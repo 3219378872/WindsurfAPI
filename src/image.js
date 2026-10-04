@@ -754,3 +754,47 @@ export async function extractImages(contentBlocks) {
 
   return { text, images };
 }
+
+// DEVIN_CONNECT's wire builder only inlines data: URIs (devin-connect.js
+// extractInlineImages is synchronous), so a remote http(s) image_url used to be
+// dropped silently on that path. Resolve them here, before the wire build, with
+// the same SSRF-guarded, deadline-bounded fetch + shrink gate the Cascade path
+// uses. Returns a new array; messages without remote images are returned as-is.
+// A failed fetch becomes a text note so the model is told an image was missing
+// instead of the turn quietly losing it.
+const MAX_REMOTE_IMAGES_PER_REQUEST = 8;
+
+export async function inlineRemoteImages(messages, { fetchImpl = fetchImageUrl, max = MAX_REMOTE_IMAGES_PER_REQUEST } = {}) {
+  if (!Array.isArray(messages)) return messages;
+  const isRemote = (p) => p?.type === 'image_url' && /^https?:\/\//i.test(String(p.image_url?.url || '').trim());
+  if (!messages.some((m) => Array.isArray(m?.content) && m.content.some(isRemote))) return messages;
+  let fetched = 0;
+  const out = [];
+  for (const m of messages) {
+    if (!Array.isArray(m?.content) || !m.content.some(isRemote)) { out.push(m); continue; }
+    const content = [];
+    for (const part of m.content) {
+      if (!isRemote(part)) { content.push(part); continue; }
+      const url = String(part.image_url.url).trim();
+      if (fetched >= max) {
+        content.push({ type: 'text', text: `[image not loaded: more than ${max} remote images in one request]` });
+        continue;
+      }
+      fetched++;
+      try {
+        const images = [];
+        const img = await pushImage(images, await fetchImpl(url));
+        if (img) {
+          content.push({ type: 'image_url', image_url: { url: `data:${img.mime_type};base64,${img.base64_data}` } });
+        } else {
+          content.push({ type: 'text', text: '[image not loaded: unsupported or invalid image]' });
+        }
+      } catch (e) {
+        log.warn(`Remote image fetch failed: ${e.message}`);
+        content.push({ type: 'text', text: `[image not loaded: ${e.message}]` });
+      }
+    }
+    out.push({ ...m, content });
+  }
+  return out;
+}

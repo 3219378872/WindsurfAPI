@@ -548,8 +548,9 @@ function normalizeImageBlock(block) {
 // B2: flatten an array of tool_result content sub-blocks to a string WITHOUT
 // dropping non-text blocks. The old `b.text || ''` join silently collapsed
 // image sub-blocks to empty; here they become an explicit placeholder so the
-// model still knows an image was returned. Real forwarding of tool_result
-// images needs the gated vision path — TODO(PAID-1).
+// model still knows an image was returned. The tool_result caller also hoists
+// the image bytes themselves into the following user message (see
+// toolResultImages in anthropicToOpenAI), so the placeholder says where they went.
 /**
  * Wrap a DECODED document block's text so its provenance survives translation.
  *
@@ -573,13 +574,13 @@ function wrapDocumentText(label, text) {
   return `[document: ${label}]\n${text}\n[/document]`;
 }
 
-function flattenContentBlocks(blocks) {
+function flattenContentBlocks(blocks, { imageNote = '' } = {}) {
   const parts = [];
   for (const b of (Array.isArray(blocks) ? blocks : [])) {
     if (!b || typeof b !== 'object') { parts.push(String(b ?? '')); continue; }
     if (b.type === 'image') {
       const mt = b.source?.media_type || 'image';
-      parts.push(`[image: ${mt}]`);
+      parts.push(`[image: ${mt}${imageNote}]`);
     } else if (typeof b.text === 'string') {
       parts.push(b.text);
     } else {
@@ -659,6 +660,8 @@ function anthropicToOpenAI(body, ccActive = false, promptEstimate = null) {
       const imageParts = [];
       const toolCalls = [];
       const toolResults = [];
+      const toolResultImages = [];
+      const toolResultImageIds = [];
       const msgThinking = [];
       for (const block of m.content) {
         if (block.type === 'text') {
@@ -707,11 +710,25 @@ function anthropicToOpenAI(body, ccActive = false, promptEstimate = null) {
             function: { name: block.name, arguments: JSON.stringify(block.input ?? {}) },
           });
         } else if (block.type === 'tool_result') {
+          // Images returned by a tool (Claude Code Read on an image file, browser /
+          // screenshot MCP tools) used to be flattened to "[image: …]" and never
+          // reached the model. The tool message stays text-only — every downstream
+          // tool-history transform expects a string there, and the wire has only
+          // ever been verified carrying images on source=USER turns — so the image
+          // bytes are hoisted into the user message pushed right after the tool
+          // results, which is the shape a pasted image already takes.
+          const resultImages = Array.isArray(block.content)
+            ? block.content.filter((b) => b?.type === 'image').map(normalizeImageBlock).filter(Boolean)
+            : [];
+          if (resultImages.length) {
+            toolResultImages.push(...resultImages);
+            toolResultImageIds.push(block.tool_use_id);
+          }
           // B2: flatten sub-blocks without dropping non-text (image) blocks.
           let content = typeof block.content === 'string'
             ? block.content
             : Array.isArray(block.content)
-              ? flattenContentBlocks(block.content)
+              ? flattenContentBlocks(block.content, resultImages.length ? { imageNote: ' — attached in the next user message' } : {})
               : JSON.stringify(block.content);
           content = annotateRiskyReadToolResult(content, {
             toolName: toolNameById.get(block.tool_use_id),
@@ -726,6 +743,10 @@ function anthropicToOpenAI(body, ccActive = false, promptEstimate = null) {
       // Tool results must directly follow the assistant tool_calls message
       // in OpenAI format. Push them before the user content message.
       for (const tr of toolResults) messages.push(tr);
+      if (toolResultImages.length) {
+        imageParts.unshift(...toolResultImages);
+        textParts.unshift(`[The image(s) above were returned by tool result ${toolResultImageIds.join(', ')}]`);
+      }
       if (toolCalls.length) {
         messages.push({
           role: 'assistant',

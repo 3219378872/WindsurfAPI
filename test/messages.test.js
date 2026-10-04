@@ -1224,9 +1224,14 @@ describe('Anthropic messages request translation', () => {
         ] },
       ],
     });
-    const toolMsg = captured.messages.find(m => m.role === 'tool');
+    const toolIdx = captured.messages.findIndex(m => m.role === 'tool');
+    const toolMsg = captured.messages[toolIdx];
     assert.match(toolMsg.content, /here is the screen/, 'text sub-block preserved');
-    assert.match(toolMsg.content, /\[image: image\/png\]/, 'image sub-block is not flattened to empty');
+    assert.match(toolMsg.content, /\[image: image\/png — attached in the next user message\]/, 'image sub-block is not flattened to empty');
+    // The image bytes themselves ride the following user message.
+    const next = captured.messages[toolIdx + 1];
+    assert.equal(next.role, 'user');
+    assert.equal(next.content[0].image_url.url, 'data:image/png;base64,AAAA');
   });
 
   it('F1: passes top_k through to the converted chat body', async () => {

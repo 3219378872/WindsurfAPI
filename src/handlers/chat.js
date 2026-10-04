@@ -59,6 +59,7 @@ import { resolveConnectSelector } from '../devin-connect-models.js';
 import { isRetryable as isConnectRetryable, getToolDefTags, parseToolCallTagMap } from '../devin-connect.js';
 import { isRouterModel, assignModel as _assignModel } from '../devin-connect-catalog.js';
 import { bumpConnect } from '../devin-connect-metrics.js';
+import { inlineRemoteImages } from '../image.js';
 import { resolveSessionId as resolveConnectSessionId, commitAfterResponse as commitConnectSession, getSessionModelConfig as getSessionConnectModelConfig, getSessionReasoningTrail as getSessionConnectReasoningTrail } from '../session-continuity.js';
 import { newTraceId, traceClientRequest, traceRouting, traceClientResponse, traceEnabled } from '../trace.js';
 import { sanitizeText, sanitizeToolCall, PathSanitizeStream } from '../sanitize.js';
@@ -3449,6 +3450,9 @@ async function _handleChatCompletionsInner(body, context = {}) {
         const neut = neutralizeMessageContent(m.content);
         return neut === m.content ? m : { ...m, content: neut };
       });
+      // The connect wire builder only inlines data: URIs; fetch remote image URLs
+      // now so they are not dropped at encode time.
+      connectMessages = await inlineRemoteImages(connectMessages);
     }
     log.info(`Chat[${reqId}]: DEVIN_CONNECT ${safeLogValue(reqModelName)} -> selector=${safeLogValue(selector)}${mapped ? '' : ' [unmapped→free-tier]'} stream=${!!stream}${emulateTools ? ` tools=${connectTools.length}` : ''}`);
     const ccId = genId();
